@@ -18,9 +18,7 @@ pipeline {
         registryCredential = 'ecr:us-east-1:awscreds'
         appRegistry = '776648109966.dkr.ecr.us-east-1.amazonaws.com/vprofile-app-img-new'
         vprofileRegistry = "https://776648109966.dkr.ecr.us-east-1.amazonaws.com"
-        cluster = "vproappstaging"
-        service = "vproapptask-service-staging"
-        TASK_FAMILY = 'vproapptask'
+        dbRegistry = '776648109966.dkr.ecr.us-east-1.amazonaws.com/vprofile-db-image-repo'
     }
     stages {
         stage('Build') { 
@@ -102,12 +100,23 @@ pipeline {
                 }
             }
         }
+        stage('Build DB Image') {
+            steps {
+                script {
+                    docker_dbImage = docker.build(
+                        dbRegistry + ":${BUILD_NUMBER}",
+                        "-f Docker-files/db/Dockerfile ."
+                    )
+                }
+            }
+        }
         stage('Trivy Scan') {
             steps {
                 sh """
                 mkdir -p /var/lib/jenkins/trivy-tmp
                 export TMPDIR=/var/lib/jenkins/trivy-tmp
-
+                
+                echo "Scanning APP Image..."
                 trivy image \
                 --cache-dir /var/lib/jenkins/.cache/trivy \
                 --severity HIGH,CRITICAL \
@@ -116,10 +125,23 @@ pipeline {
                 -o trivy-report.json \
                 ${appRegistry}:${BUILD_NUMBER}
                  """
+                sh """
+                mkdir -p /var/lib/jenkins/trivy-tmp
+                export TMPDIR=/var/lib/jenkins/trivy-tmp
+
+                echo "Scanning DB Image..."
+                trivy image \
+                --cache-dir /var/lib/jenkins/.cache/trivy \
+                --severity HIGH,CRITICAL \
+                --exit-code 0 \
+                -f table \
+                -o trivy-db-report.json \
+                ${dbRegistry}:${BUILD_NUMBER}
+                """
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'trivy-*-report.json', allowEmptyArchive: true
                 }
             }
         }
@@ -133,49 +155,43 @@ pipeline {
             }
           }
         }
-        stage('Deploy to ecs') {
+        stage('Upload DB Image to ECR') {
             steps {
-                withAWS(credentials: 'awscreds', region: 'us-east-1') {
-                    script {
-                        env.TASK_DEF_ARN = sh(
-                            script: """
-                            IMAGE_URI=${appRegistry}:${BUILD_NUMBER}
-                            aws ecs describe-task-definition --task-definition ${TASK_FAMILY} --query taskDefinition > task-def.json
-                            jq 'del(
-                            .taskDefinitionArn,
-                            .revision,
-                            .status,
-                            .requiresAttributes,
-                            .compatibilities,
-                            .registeredAt,
-                            .registeredBy
-                            )' task-def.json > task-def-clean.json
-                            jq --arg IMAGE "\$IMAGE_URI" '.containerDefinitions[0].image=\$IMAGE' task-def-clean.json > task-def-new.json
-                            aws ecs register-task-definition --cli-input-json file://task-def-new.json --query "taskDefinition.taskDefinitionArn" --output text
-                            """,
-                            returnStdout: true
-                            ).trim()
-
-                            echo "New Revision: ${env.TASK_DEF_ARN}"
-                            sh """
-                            aws ecs update-service --cluster ${cluster} --service ${service} --task-definition ${TASK_DEF_ARN}
-                            """
-                            sh """
-                            aws ecs wait services-stable --cluster ${cluster} --services ${service}
-                            """
-                        }
+                script {
+                    docker.withRegistry(vprofileRegistry, registryCredential) {
+                        docker_dbImage.push("${BUILD_NUMBER}")
+                        docker_dbImage.push('latest')
+                    }
                 }
             }
         }
-        stage('Verify Deployment') { 
-            steps { 
-                withAWS(credentials: 'awscreds', region: 'us-east-1') { 
-                    sh """ 
-                    aws ecs wait services-stable --cluster ${cluster} --services ${service} 
-                    """ 
-                } 
-            } 
+
+        stage('Deploy To EKS') {
+    steps {
+        withAWS(
+            credentials: 'awscreds',
+            region: 'us-east-1'
+        ) {
+            sh """
+            aws eks update-kubeconfig \
+            --region us-east-1 \
+            --name vprofile-eks
+
+            # Update App Image
+            kubectl set image deployment/vprofile \
+            vprofile=${appRegistry}:${BUILD_NUMBER}
+
+            # Update DB Image
+            kubectl set image deployment/vprodb \
+            vprodb=${dbRegistry}:${BUILD_NUMBER}
+
+            # Wait for rollouts
+            kubectl rollout status deployment/vprofile
+            kubectl rollout status deployment/vprodb
+            """
         }
+    }
+}
 
     }
     post { 
