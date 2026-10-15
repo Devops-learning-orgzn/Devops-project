@@ -1,10 +1,12 @@
 FROM maven:3.9.9-eclipse-temurin-21-jammy AS build_image
 
-WORKDIR /app && COPY pom.xml .
+WORKDIR /app 
+
+COPY pom.xml .
 COPY src ./src
 RUN mvn clean package -Dskiptests
 
-FROM tomcat:10-jdk21
+FROM tomcat:10.1-jdk21-temurin-noble
 
 RUN rm -rf /usr/local/tomcat/webapps/*
 
