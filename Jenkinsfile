@@ -21,6 +21,11 @@ pipeline {
         dbRegistry = '776648109966.dkr.ecr.us-east-1.amazonaws.com/vprofile-db-image-repo'
     }
     stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
         stage('Build') { 
             steps { 
                 sh 'mvn clean install -DskipTests' 
@@ -167,32 +172,30 @@ pipeline {
         }
 
         stage('Deploy To EKS') {
-    steps {
-        withAWS(
-            credentials: 'awscreds',
-            region: 'us-east-1'
-        ) {
-            sh """
-            aws eks update-kubeconfig \
-            --region us-east-1 \
-            --name vprofile-eks
+            steps {
+                withAWS(credentials: 'awscreds', region: 'us-east-1') {
+                    sh """
+                    aws eks update-kubeconfig \
+                    --region us-east-1 \
+                    --name vprofile-eks
 
-            # Update App Image
-            kubectl set image deployment/vprofile \
-            vprofile=${appRegistry}:${BUILD_NUMBER}
+                    kubectl apply -f k8s/
 
-            # Update DB Image
-            kubectl set image deployment/vprodb \
-            vprodb=${dbRegistry}:${BUILD_NUMBER}
+                    # Update App Image
+                    kubectl set image deployment/vprofile \
+                    vprofile=${appRegistry}:${BUILD_NUMBER}
 
-            # Wait for rollouts
-            kubectl rollout status deployment/vprofile
-            kubectl rollout status deployment/vprodb
-            """
+                    # Update DB Image
+                    kubectl set image deployment/vprodb \
+                    vprodb=${dbRegistry}:${BUILD_NUMBER}
+
+                    # Wait for rollouts
+                    kubectl rollout status deployment/vprofile
+                    kubectl rollout status deployment/vprodb
+                    """
+                }
+            }
         }
-    }
-}
-
     }
     post { 
         always { 
